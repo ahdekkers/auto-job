@@ -6,137 +6,250 @@ import (
 	"os"
 	"sync"
 
+	"github.com/ahdekkers/auto-job.git/analyser"
 	"github.com/ahdekkers/auto-job.git/jobs"
+	"github.com/ahdekkers/auto-job.git/users"
 )
 
-// fileStore is the in-file data structure — a map of job ID to Job.
-type fileStore map[string]jobs.Job
-
-// FileJobStorage is an implementation of interfaces.JobStorage that persists
-// all jobs as a single JSON file on disk.
-type FileJobStorage struct {
-	mu       sync.RWMutex
-	filePath string
+// FileStorage implements JobStorage, UserStorage, and AnalysisStorage
+// backed by a single JSON file.
+type FileStorage struct {
+	FilePath string
+	mu       sync.Mutex
 }
 
-// NewFileJobStorage creates a new FileJobStorage backed by the file at filePath.
-// If the file does not exist it will be created on the first write.
-func NewFileJobStorage(filePath string) *FileJobStorage {
-	return &FileJobStorage{filePath: filePath}
+// fileData is the full persisted structure.
+type fileData struct {
+	Jobs     map[string]jobs.Job            `json:"jobs"`
+	Users    map[string]users.User          `json:"users"`
+	Analysis map[string][]analyser.Analysis `json:"analysis"` // keyed by userID
 }
 
-// load reads and deserialises the JSON file from disk.
-// Must be called with at least a read lock held.
-func (s *FileJobStorage) load() (fileStore, error) {
-	data, err := os.ReadFile(s.filePath)
-	if os.IsNotExist(err) {
-		return make(fileStore), nil
+// NewFileStorage creates a new file storage instance.
+func NewFileStorage(path string) *FileStorage {
+	return &FileStorage{
+		FilePath: path,
 	}
+}
+
+// --------------------
+// internal helpers
+// --------------------
+
+func (f *FileStorage) load() (*fileData, error) {
+	// If file doesn't exist, return empty structure
+	if _, err := os.Stat(f.FilePath); os.IsNotExist(err) {
+		return &fileData{
+			Jobs:     make(map[string]jobs.Job),
+			Users:    make(map[string]users.User),
+			Analysis: make(map[string][]analyser.Analysis),
+		}, nil
+	}
+
+	bytes, err := os.ReadFile(f.FilePath)
 	if err != nil {
-		return nil, fmt.Errorf("reading storage file: %w", err)
+		return nil, fmt.Errorf("read file: %w", err)
 	}
 
-	var store fileStore
-	if err := json.Unmarshal(data, &store); err != nil {
-		return nil, fmt.Errorf("parsing storage file: %w", err)
+	var data fileData
+	if err := json.Unmarshal(bytes, &data); err != nil {
+		return nil, fmt.Errorf("unmarshal file: %w", err)
 	}
-	return store, nil
+
+	// Ensure maps are initialized
+	if data.Jobs == nil {
+		data.Jobs = make(map[string]jobs.Job)
+	}
+	if data.Users == nil {
+		data.Users = make(map[string]users.User)
+	}
+	if data.Analysis == nil {
+		data.Analysis = make(map[string][]analyser.Analysis)
+	}
+
+	return &data, nil
 }
 
-// save serialises the store and writes it atomically to disk.
-// Must be called with the write lock held.
-func (s *FileJobStorage) save(store fileStore) error {
-	data, err := json.MarshalIndent(store, "", "  ")
+func (f *FileStorage) save(data *fileData) error {
+	bytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		return fmt.Errorf("serialising store: %w", err)
+		return fmt.Errorf("marshal file: %w", err)
 	}
-	if err := os.WriteFile(s.filePath, data, 0644); err != nil {
-		return fmt.Errorf("writing storage file: %w", err)
+
+	if err := os.WriteFile(f.FilePath, bytes, 0644); err != nil {
+		return fmt.Errorf("write file: %w", err)
 	}
+
 	return nil
 }
 
-// Store persists a job. The job must already have its ID set.
-func (s *FileJobStorage) Store(job jobs.Job) error {
-	if job.ID == "" {
-		return fmt.Errorf("job ID must be set before storing")
-	}
+// --------------------
+// JobStorage
+// --------------------
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (f *FileStorage) StoreJobs(jobList []jobs.Job) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 
-	store, err := s.load()
+	data, err := f.load()
 	if err != nil {
 		return err
 	}
 
-	store[job.ID] = job
-	return s.save(store)
-}
-
-// Retrieve returns the job with the given ID, or an error if not found.
-func (s *FileJobStorage) Retrieve(jobID string) (jobs.Job, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	store, err := s.load()
-	if err != nil {
-		return jobs.Job{}, err
+	for _, job := range jobList {
+		data.Jobs[job.ID] = job
 	}
 
-	job, ok := store[jobID]
-	if !ok {
-		return jobs.Job{}, fmt.Errorf("job %q not found", jobID)
-	}
-	return job, nil
+	return f.save(data)
 }
 
-// RetrieveAll returns the jobs corresponding to the given IDs.
-// IDs that are not found are silently skipped.
-func (s *FileJobStorage) RetrieveAll(jobIDs []string) ([]jobs.Job, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// NOTE: interface is a bit odd (takes []jobs.Job as input)
+// We'll interpret this as a filter by IDs if provided.
+func (f *FileStorage) RetrieveJobs(filter []jobs.Job) ([]jobs.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 
-	store, err := s.load()
+	data, err := f.load()
 	if err != nil {
 		return nil, err
 	}
 
-	jobs := make([]jobs.Job, 0, len(jobIDs))
-	for _, id := range jobIDs {
-		if job, ok := store[id]; ok {
-			jobs = append(jobs, job)
+	// If no filter, return all
+	if len(filter) == 0 {
+		result := make([]jobs.Job, 0, len(data.Jobs))
+		for _, job := range data.Jobs {
+			result = append(result, job)
+		}
+		return result, nil
+	}
+
+	// Otherwise filter by IDs
+	result := []jobs.Job{}
+	for _, j := range filter {
+		if stored, ok := data.Jobs[j.ID]; ok {
+			result = append(result, stored)
 		}
 	}
-	return jobs, nil
+
+	return result, nil
 }
 
-// Delete removes the job with the given ID.
-func (s *FileJobStorage) Delete(jobID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (f *FileStorage) DeleteJobs(jobIDs []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 
-	store, err := s.load()
-	if err != nil {
-		return err
-	}
-
-	delete(store, jobID)
-	return s.save(store)
-}
-
-// DeleteAll removes all jobs with the given IDs.
-func (s *FileJobStorage) DeleteAll(jobIDs []string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	store, err := s.load()
+	data, err := f.load()
 	if err != nil {
 		return err
 	}
 
 	for _, id := range jobIDs {
-		delete(store, id)
+		delete(data.Jobs, id)
 	}
-	return s.save(store)
+
+	return f.save(data)
+}
+
+// --------------------
+// UserStorage
+// --------------------
+
+func (f *FileStorage) StoreUsers(user users.User) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	data, err := f.load()
+	if err != nil {
+		return err
+	}
+
+	// Using Email as unique ID (you can swap this if needed)
+	userID := user.Email
+	if userID == "" {
+		return fmt.Errorf("user email cannot be empty")
+	}
+
+	data.Users[userID] = user
+
+	return f.save(data)
+}
+
+func (f *FileStorage) RetrieveUsers(userID string) (users.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	data, err := f.load()
+	if err != nil {
+		return users.User{}, err
+	}
+
+	user, ok := data.Users[userID]
+	if !ok {
+		return users.User{}, fmt.Errorf("user not found: %s", userID)
+	}
+
+	return user, nil
+}
+
+func (f *FileStorage) DeleteUsers(userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	data, err := f.load()
+	if err != nil {
+		return err
+	}
+
+	delete(data.Users, userID)
+	delete(data.Analysis, userID) // also clean up related analysis
+
+	return f.save(data)
+}
+
+// --------------------
+// AnalysisStorage
+// --------------------
+
+func (f *FileStorage) StoreAnalysis(a analyser.Analysis) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	data, err := f.load()
+	if err != nil {
+		return err
+	}
+
+	if a.UserID == "" {
+		return fmt.Errorf("analysis user_id cannot be empty")
+	}
+
+	data.Analysis[a.UserID] = append(data.Analysis[a.UserID], a)
+
+	return f.save(data)
+}
+
+func (f *FileStorage) RetrieveAnalysis(userID string) ([]analyser.Analysis, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	data, err := f.load()
+	if err != nil {
+		return nil, err
+	}
+
+	return data.Analysis[userID], nil
+}
+
+func (f *FileStorage) DeleteAnalysis(userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	data, err := f.load()
+	if err != nil {
+		return err
+	}
+
+	delete(data.Analysis, userID)
+
+	return f.save(data)
 }
