@@ -16,28 +16,27 @@ import (
 )
 
 func main() {
-	// Core component configuration.
-	action := flag.String("action", "", "Controller action to run: create-user or search")
+	action := flag.String("action", "", "Controller action to run: create-user, save-search, or search")
+
 	apiKey := flag.String("api-key", "", "RapidAPI key for the jobs API")
-	ollamaBaseURL := flag.String("ollama-base-url", "http://192.168.1.97:11434", "Ollama base URL")
-	model := flag.String("model", "llama3:7b", "Ollama model name")
+	ollamaBaseURL := flag.String("ollama-base-url", "http://localhost:11434", "Ollama base URL")
+	model := flag.String("model", "gemma3", "Ollama model name")
 	storageFile := flag.String("storage-file", "data.json", "Path to JSON storage file")
 
-	// Create-user inputs.
 	name := flag.String("name", "", "User name")
 	email := flag.String("email", "", "User email")
 	yearsOfExperience := flag.String("years-of-experience", "", "Years of experience")
 	currentTitle := flag.String("current-title", "", "Current job title")
-	skills := flag.String("skills", "", "Comma-separated skills")
 	preferredWorkModes := flag.String("preferred-work-modes", "", "Comma-separated work modes: remote,onsite,hybrid,any")
 	preferredLocations := flag.String("preferred-locations", "", "Comma-separated preferred locations")
 	salaryMin := flag.String("salary-min", "", "Minimum salary expectation")
 	salaryMax := flag.String("salary-max", "", "Maximum salary expectation")
-	cvSummary := flag.String("cv-summary", "", "Plain-text CV summary")
+	cvFile := flag.String("cv-file", "", "Path to CV file")
 	additionalNotes := flag.String("additional-notes", "", "Comma-separated additional notes")
 
-	// Search inputs.
+	searchName := flag.String("search-name", "", "Unique saved search name")
 	userID := flag.String("user-id", "", "User ID for job search, usually the user's email")
+
 	limit := flag.String("limit", "", "API limit")
 	offset := flag.String("offset", "", "API offset")
 	titleFilter := flag.String("title-filter", "", "Title filter")
@@ -82,44 +81,40 @@ func main() {
 		fileStorage,
 		fileStorage,
 		fileStorage,
+		fileStorage,
 	)
 
 	switch strings.ToLower(strings.TrimSpace(*action)) {
 	case "create-user":
-		runCreateUser(ctrl, *name, *email, *yearsOfExperience, *currentTitle, *skills, *preferredWorkModes, *preferredLocations, *salaryMin, *salaryMax, *cvSummary, *additionalNotes)
+		runCreateUser(ctrl, *name, *email, *yearsOfExperience, *currentTitle, *preferredWorkModes, *preferredLocations, *salaryMin, *salaryMax, *cvFile, *additionalNotes)
+
+	case "save-search":
+		runSaveSearch(ctrl, *searchName, buildSearchParams(
+			limit, offset, titleFilter, locationFilter, descriptionFilter,
+			organizationDescriptionFilter, organizationSpecialtiesFilter, organizationSlugFilter,
+			descriptionType, typeFilter, remote, agency, industryFilter, seniorityFilter,
+			dateFilter, excludeAtsDuplicate, externalApplyURL, directApply, employeesLTE,
+			employeesGTE, order, advancedTitleFilter,
+		))
+
 	case "search":
-		runSearch(ctrl, *userID, jobs.JobSearchParams{
-			Limit:                   mustIntPtr(limit),
-			Offset:                  mustIntPtr(offset),
-			TitleFilter:             *titleFilter,
-			LocationFilter:          *locationFilter,
-			DescriptionFilter:       *descriptionFilter,
-			OrganizationDescription: *organizationDescriptionFilter,
-			OrganizationSpecialties: *organizationSpecialtiesFilter,
-			OrganizationSlugFilter:  *organizationSlugFilter,
-			DescriptionType:         *descriptionType,
-			TypeFilter:              *typeFilter,
-			Remote:                  mustBoolPtr(remote),
-			Agency:                  mustBoolPtr(agency),
-			IndustryFilter:          *industryFilter,
-			SeniorityFilter:         *seniorityFilter,
-			DateFilter:              *dateFilter,
-			ExcludeATSDuplicate:     mustBoolPtr(excludeAtsDuplicate),
-			ExternalApplyURL:        mustBoolPtr(externalApplyURL),
-			DirectApply:             mustBoolPtr(directApply),
-			EmployeesLTE:            mustIntPtr(employeesLTE),
-			EmployeesGTE:            mustIntPtr(employeesGTE),
-			Order:                   *order,
-			AdvancedTitleFilter:     *advancedTitleFilter,
-		})
+		if strings.TrimSpace(*searchName) == "" {
+			exitErr(fmt.Errorf("missing required --search-name for search"))
+		}
+		if strings.TrimSpace(*userID) == "" {
+			exitErr(fmt.Errorf("missing required --user-id for search"))
+		}
+
+		runSearch(ctrl, *userID, *searchName)
+
 	default:
-		exitErr(fmt.Errorf("unknown --action %q (use create-user or search)", *action))
+		exitErr(fmt.Errorf("unknown --action %q (use create-user, save-search, or search)", *action))
 	}
 }
 
 func runCreateUser(
 	ctrl *controller.AppController,
-	name, email, yearsStr, currentTitle, skillsStr, modesStr, locationsStr, salaryMinStr, salaryMaxStr, cvSummary, notesStr string,
+	name, email, yearsStr, currentTitle, modesStr, locationsStr, salaryMinStr, salaryMaxStr, cvFile, notesStr string,
 ) {
 	years, err := parseRequiredInt(yearsStr, "--years-of-experience")
 	if err != nil {
@@ -136,19 +131,21 @@ func runCreateUser(
 		exitErr(err)
 	}
 
+	data, err := os.ReadFile(cvFile)
+	if err != nil {
+		exitErr(fmt.Errorf("read cv file: %w", err))
+	}
+	cvText := string(data)
+
 	user, err := ctrl.CreateUser(
 		name,
 		email,
 		years,
 		currentTitle,
-		splitCSV(skillsStr),
 		parseWorkModes(modesStr),
 		splitCSV(locationsStr),
-		users.SalaryExpectation{
-			Min: salaryMin,
-			Max: salaryMax,
-		},
-		cvSummary,
+		users.SalaryExpectation{Min: salaryMin, Max: salaryMax},
+		cvText,
 		splitCSV(notesStr),
 	)
 	if err != nil {
@@ -158,8 +155,19 @@ func runCreateUser(
 	printJSON(user)
 }
 
-func runSearch(ctrl *controller.AppController, userID string, params jobs.JobSearchParams) {
-	jobsFound, ratings, err := ctrl.ExecuteJobSearch(userID, params)
+func runSaveSearch(ctrl *controller.AppController, searchName string, params jobs.JobSearchParams) {
+	if err := ctrl.SaveSearch(searchName, params); err != nil {
+		exitErr(err)
+	}
+
+	printJSON(map[string]string{
+		"status":      "saved",
+		"search_name": searchName,
+	})
+}
+
+func runSearch(ctrl *controller.AppController, userID, searchName string) {
+	jobsFound, ratings, err := ctrl.ExecuteJobSearch(userID, searchName)
 	if err != nil {
 		exitErr(err)
 	}
@@ -173,6 +181,39 @@ func runSearch(ctrl *controller.AppController, userID string, params jobs.JobSea
 		Jobs:    jobsFound,
 		Ratings: ratings,
 	})
+}
+
+func buildSearchParams(
+	limit, offset, titleFilter, locationFilter, descriptionFilter,
+	organizationDescriptionFilter, organizationSpecialtiesFilter, organizationSlugFilter,
+	descriptionType, typeFilter, remote, agency, industryFilter, seniorityFilter,
+	dateFilter, excludeAtsDuplicate, externalApplyURL, directApply, employeesLTE,
+	employeesGTE, order, advancedTitleFilter *string,
+) jobs.JobSearchParams {
+	return jobs.JobSearchParams{
+		Limit:                   mustIntPtr(limit),
+		Offset:                  mustIntPtr(offset),
+		TitleFilter:             valueOrEmpty(titleFilter),
+		LocationFilter:          valueOrEmpty(locationFilter),
+		DescriptionFilter:       valueOrEmpty(descriptionFilter),
+		OrganizationDescription: valueOrEmpty(organizationDescriptionFilter),
+		OrganizationSpecialties: valueOrEmpty(organizationSpecialtiesFilter),
+		OrganizationSlugFilter:  valueOrEmpty(organizationSlugFilter),
+		DescriptionType:         valueOrEmpty(descriptionType),
+		TypeFilter:              valueOrEmpty(typeFilter),
+		Remote:                  mustBoolPtr(remote),
+		Agency:                  mustBoolPtr(agency),
+		IndustryFilter:          valueOrEmpty(industryFilter),
+		SeniorityFilter:         valueOrEmpty(seniorityFilter),
+		DateFilter:              valueOrEmpty(dateFilter),
+		ExcludeATSDuplicate:     mustBoolPtr(excludeAtsDuplicate),
+		ExternalApplyURL:        mustBoolPtr(externalApplyURL),
+		DirectApply:             mustBoolPtr(directApply),
+		EmployeesLTE:            mustIntPtr(employeesLTE),
+		EmployeesGTE:            mustIntPtr(employeesGTE),
+		Order:                   valueOrEmpty(order),
+		AdvancedTitleFilter:     valueOrEmpty(advancedTitleFilter),
+	}
 }
 
 func parseRequiredInt(value, flagName string) (int, error) {
@@ -215,6 +256,13 @@ func mustBoolPtr(value *string) *bool {
 		exitErr(fmt.Errorf("invalid boolean value %q: %w", s, err))
 	}
 	return &b
+}
+
+func valueOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
 }
 
 func splitCSV(s string) []string {

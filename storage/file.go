@@ -11,38 +11,31 @@ import (
 	"github.com/ahdekkers/auto-job.git/users"
 )
 
-// FileStorage implements JobStorage, UserStorage, and AnalysisStorage
+// FileStorage implements JobStorage, UserStorage, AnalysisStorage and SearchStorage
 // backed by a single JSON file.
 type FileStorage struct {
 	FilePath string
 	mu       sync.Mutex
 }
 
-// fileData is the full persisted structure.
 type fileData struct {
-	Jobs     map[string]jobs.Job            `json:"jobs"`
-	Users    map[string]users.User          `json:"users"`
-	Analysis map[string][]analyser.Analysis `json:"analysis"` // keyed by userID
+	Jobs     map[string]jobs.Job             `json:"jobs"`
+	Users    map[string]users.User           `json:"users"`
+	Analysis map[string][]analyser.Analysis  `json:"analysis"`
+	Searches map[string]jobs.JobSearchParams `json:"searches"`
 }
 
-// NewFileStorage creates a new file storage instance.
 func NewFileStorage(path string) *FileStorage {
-	return &FileStorage{
-		FilePath: path,
-	}
+	return &FileStorage{FilePath: path}
 }
-
-// --------------------
-// internal helpers
-// --------------------
 
 func (f *FileStorage) load() (*fileData, error) {
-	// If file doesn't exist, return empty structure
 	if _, err := os.Stat(f.FilePath); os.IsNotExist(err) {
 		return &fileData{
 			Jobs:     make(map[string]jobs.Job),
 			Users:    make(map[string]users.User),
 			Analysis: make(map[string][]analyser.Analysis),
+			Searches: make(map[string]jobs.JobSearchParams),
 		}, nil
 	}
 
@@ -56,7 +49,6 @@ func (f *FileStorage) load() (*fileData, error) {
 		return nil, fmt.Errorf("unmarshal file: %w", err)
 	}
 
-	// Ensure maps are initialized
 	if data.Jobs == nil {
 		data.Jobs = make(map[string]jobs.Job)
 	}
@@ -65,6 +57,9 @@ func (f *FileStorage) load() (*fileData, error) {
 	}
 	if data.Analysis == nil {
 		data.Analysis = make(map[string][]analyser.Analysis)
+	}
+	if data.Searches == nil {
+		data.Searches = make(map[string]jobs.JobSearchParams)
 	}
 
 	return &data, nil
@@ -83,9 +78,7 @@ func (f *FileStorage) save(data *fileData) error {
 	return nil
 }
 
-// --------------------
 // JobStorage
-// --------------------
 
 func (f *FileStorage) StoreJobs(jobList []jobs.Job) error {
 	f.mu.Lock()
@@ -103,8 +96,6 @@ func (f *FileStorage) StoreJobs(jobList []jobs.Job) error {
 	return f.save(data)
 }
 
-// NOTE: interface is a bit odd (takes []jobs.Job as input)
-// We'll interpret this as a filter by IDs if provided.
 func (f *FileStorage) RetrieveJobs(filter []jobs.Job) ([]jobs.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -114,7 +105,6 @@ func (f *FileStorage) RetrieveJobs(filter []jobs.Job) ([]jobs.Job, error) {
 		return nil, err
 	}
 
-	// If no filter, return all
 	if len(filter) == 0 {
 		result := make([]jobs.Job, 0, len(data.Jobs))
 		for _, job := range data.Jobs {
@@ -123,8 +113,7 @@ func (f *FileStorage) RetrieveJobs(filter []jobs.Job) ([]jobs.Job, error) {
 		return result, nil
 	}
 
-	// Otherwise filter by IDs
-	result := []jobs.Job{}
+	result := make([]jobs.Job, 0, len(filter))
 	for _, j := range filter {
 		if stored, ok := data.Jobs[j.ID]; ok {
 			result = append(result, stored)
@@ -150,9 +139,7 @@ func (f *FileStorage) DeleteJobs(jobIDs []string) error {
 	return f.save(data)
 }
 
-// --------------------
 // UserStorage
-// --------------------
 
 func (f *FileStorage) StoreUsers(user users.User) error {
 	f.mu.Lock()
@@ -163,14 +150,12 @@ func (f *FileStorage) StoreUsers(user users.User) error {
 		return err
 	}
 
-	// Using Email as unique ID (you can swap this if needed)
 	userID := user.Email
 	if userID == "" {
 		return fmt.Errorf("user email cannot be empty")
 	}
 
 	data.Users[userID] = user
-
 	return f.save(data)
 }
 
@@ -201,14 +186,12 @@ func (f *FileStorage) DeleteUsers(userID string) error {
 	}
 
 	delete(data.Users, userID)
-	delete(data.Analysis, userID) // also clean up related analysis
+	delete(data.Analysis, userID)
 
 	return f.save(data)
 }
 
-// --------------------
 // AnalysisStorage
-// --------------------
 
 func (f *FileStorage) StoreAnalysis(a analyser.Analysis) error {
 	f.mu.Lock()
@@ -224,7 +207,6 @@ func (f *FileStorage) StoreAnalysis(a analyser.Analysis) error {
 	}
 
 	data.Analysis[a.UserID] = append(data.Analysis[a.UserID], a)
-
 	return f.save(data)
 }
 
@@ -250,6 +232,58 @@ func (f *FileStorage) DeleteAnalysis(userID string) error {
 	}
 
 	delete(data.Analysis, userID)
+	return f.save(data)
+}
 
+// SearchStorage
+
+func (f *FileStorage) StoreSearch(searchName string, params jobs.JobSearchParams) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if searchName == "" {
+		return fmt.Errorf("search name cannot be empty")
+	}
+
+	data, err := f.load()
+	if err != nil {
+		return err
+	}
+
+	if _, exists := data.Searches[searchName]; exists {
+		return fmt.Errorf("search already exists: %s", searchName)
+	}
+
+	data.Searches[searchName] = params
+	return f.save(data)
+}
+
+func (f *FileStorage) RetrieveSearch(searchName string) (jobs.JobSearchParams, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	data, err := f.load()
+	if err != nil {
+		return jobs.JobSearchParams{}, err
+	}
+
+	params, ok := data.Searches[searchName]
+	if !ok {
+		return jobs.JobSearchParams{}, fmt.Errorf("search not found: %s", searchName)
+	}
+
+	return params, nil
+}
+
+func (f *FileStorage) DeleteSearch(searchName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	data, err := f.load()
+	if err != nil {
+		return err
+	}
+
+	delete(data.Searches, searchName)
 	return f.save(data)
 }

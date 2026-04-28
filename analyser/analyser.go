@@ -142,14 +142,10 @@ Your task is to estimate how well a job matches a user's profile and preferences
 
 Score the job from 0.0 to 1.0 using these factors:
 - title relevance
-- skill match
 - years of experience fit
-- location fit
-- work mode fit
-- salary fit
+- allignment between job description requirements and user's cv
 - seniority fit
 - alignment with extra notes and dealbreakers
-- quality of the CV summary match
 
 Scoring guidance:
 - 1.0 = excellent match, very likely a strong fit

@@ -24,3 +24,9 @@ type AnalysisStorage interface {
 	RetrieveAnalysis(userID string) ([]analyser.Analysis, error)
 	DeleteAnalysis(userID string) error
 }
+
+type SearchStorage interface {
+	StoreSearch(searchName string, params jobs.JobSearchParams) error
+	RetrieveSearch(searchName string) (jobs.JobSearchParams, error)
+	DeleteSearch(searchName string) error
+}

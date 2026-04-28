@@ -10,22 +10,22 @@ import (
 	"github.com/ahdekkers/auto-job.git/users"
 )
 
-// AppController is the concrete implementation of Controller.
 type AppController struct {
 	JobAPI          *jobs.FantasticJobsAPI
 	Analyser        analyser.JobAnalyser
 	JobStorage      storage.JobStorage
 	UserStorage     storage.UserStorage
 	AnalysisStorage storage.AnalysisStorage
+	SearchStorage   storage.SearchStorage
 }
 
-// NewAppController constructs a new controller.
 func NewAppController(
 	jobAPI *jobs.FantasticJobsAPI,
 	analyser analyser.JobAnalyser,
 	jobStorage storage.JobStorage,
 	userStorage storage.UserStorage,
 	analysisStorage storage.AnalysisStorage,
+	searchStorage storage.SearchStorage,
 ) *AppController {
 	return &AppController{
 		JobAPI:          jobAPI,
@@ -33,20 +33,19 @@ func NewAppController(
 		JobStorage:      jobStorage,
 		UserStorage:     userStorage,
 		AnalysisStorage: analysisStorage,
+		SearchStorage:   searchStorage,
 	}
 }
 
-// CreateUser constructs a user from input fields and persists it.
 func (c *AppController) CreateUser(
 	name string,
 	email string,
 	yearsOfExperience int,
 	currentTitle string,
-	skills []string,
 	preferredWorkModes []users.WorkMode,
 	preferredLocations []string,
 	salaryExpectation users.SalaryExpectation,
-	cvSummary string,
+	cv string,
 	additionalNotes []string,
 ) (users.User, error) {
 	user := users.User{
@@ -54,11 +53,10 @@ func (c *AppController) CreateUser(
 		Email:              strings.TrimSpace(email),
 		YearsOfExperience:  yearsOfExperience,
 		CurrentTitle:       strings.TrimSpace(currentTitle),
-		Skills:             append([]string(nil), skills...),
 		PreferredWorkModes: append([]users.WorkMode(nil), preferredWorkModes...),
 		PreferredLocations: append([]string(nil), preferredLocations...),
 		SalaryExpectation:  salaryExpectation,
-		CVSummary:          strings.TrimSpace(cvSummary),
+		CV:                 strings.TrimSpace(cv),
 		AdditionalNotes:    append([]string(nil), additionalNotes...),
 	}
 
@@ -76,14 +74,34 @@ func (c *AppController) CreateUser(
 	return user, nil
 }
 
-// ExecuteJobSearch fetches jobs, loads the user, scores the jobs, and stores the results.
+func (c *AppController) SaveSearch(searchName string, params jobs.JobSearchParams) error {
+	searchName = strings.TrimSpace(searchName)
+	if searchName == "" {
+		return fmt.Errorf("search name is required")
+	}
+	if c.SearchStorage == nil {
+		return fmt.Errorf("search storage is nil")
+	}
+
+	if err := c.SearchStorage.StoreSearch(searchName, params); err != nil {
+		return fmt.Errorf("store search: %w", err)
+	}
+
+	return nil
+}
+
 func (c *AppController) ExecuteJobSearch(
 	userID string,
-	params jobs.JobSearchParams,
+	searchName string,
 ) ([]jobs.Job, map[string]analyser.SuitabilityRating, error) {
 	userID = strings.TrimSpace(userID)
+	searchName = strings.TrimSpace(searchName)
+
 	if userID == "" {
 		return nil, nil, fmt.Errorf("userID is required")
+	}
+	if searchName == "" {
+		return nil, nil, fmt.Errorf("search name is required")
 	}
 	if c.JobAPI == nil {
 		return nil, nil, fmt.Errorf("job api client is nil")
@@ -91,13 +109,18 @@ func (c *AppController) ExecuteJobSearch(
 	if c.Analyser == nil {
 		return nil, nil, fmt.Errorf("analyser is nil")
 	}
-	if c.JobStorage == nil || c.UserStorage == nil || c.AnalysisStorage == nil {
+	if c.JobStorage == nil || c.UserStorage == nil || c.AnalysisStorage == nil || c.SearchStorage == nil {
 		return nil, nil, fmt.Errorf("storage dependency is nil")
 	}
 
 	user, err := c.UserStorage.RetrieveUsers(userID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("retrieve user: %w", err)
+	}
+
+	params, err := c.SearchStorage.RetrieveSearch(searchName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("retrieve search: %w", err)
 	}
 
 	foundJobs, err := c.JobAPI.GetJobs(params)

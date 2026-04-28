@@ -21,10 +21,9 @@ type User struct {
 	Email              string            `json:"email"`
 	YearsOfExperience  int               `json:"years_of_experience"`
 	CurrentTitle       string            `json:"current_title"`
-	Skills             []string          `json:"skills"`
 	PreferredWorkModes []WorkMode        `json:"preferred_work_modes"`
 	PreferredLocations []string          `json:"preferred_locations"`
 	SalaryExpectation  SalaryExpectation `json:"salary_expectation"`
-	CVSummary          string            `json:"cv_summary"`       // plain text summary of CV/resume
+	CV                 string            `json:"cv"`               // plain text CV
 	AdditionalNotes    []string          `json:"additional_notes"` // bullet points of extra preferences or dealbreakers
 }
